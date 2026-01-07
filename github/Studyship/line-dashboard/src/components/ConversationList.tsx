@@ -11,6 +11,7 @@ interface Contact {
   displayName: string
   pictureUrl: string | null
   isBlocked: boolean
+  memo: string | null
 }
 
 interface User {
@@ -115,6 +116,16 @@ export function ConversationList({ conversations, loading }: ConversationListPro
                       </span>
                     ))}
                   </div>
+                )}
+
+                {/* メモアイコン表示 */}
+                {conversation.contact.memo && (
+                  <span
+                    className="text-xs text-gray-500 mt-1 block"
+                    title={conversation.contact.memo.substring(0, 100)}
+                  >
+                    📝 メモあり
+                  </span>
                 )}
               </div>
             </div>

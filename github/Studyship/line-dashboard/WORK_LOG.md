@@ -3286,6 +3286,499 @@ Response: { users: User[] }
 
 ---
 
+## 📅 作業日時（チケット#014）
+**実施日**: 2026年1月7日
+**作業時間**: 約30分
+**担当**: 開発チーム
+
+---
+
+## 📋 実施した作業（チケット#014）
+
+### 作業タイトル
+**ルールベーストリアージの実装**
+
+### 作業の目的
+メッセージ内容に基づいて自動的に優先度・緊急度・クレームフラグを判定し、Conversationを自動分類する仕組みを実装しました。
+
+---
+
+## ✅ 完了した内容
+
+### 1. トリアージルールエンジン
+キーワードマッチングによる自動分類システム：
+
+#### 実装ファイル
+`src/lib/triage-rules.ts`
+
+#### 機能
+- クレーム判定（'最悪', '返金', '詐欺', '対応が悪い' など29キーワード）
+- 緊急度判定（NOW, TODAY, THIS_WEEK, ANYTIME）
+- 優先度判定（HIGH, MEDIUM, LOW）
+- クレーム種別分類（BILLING, QUALITY, DELAY, ATTITUDE, OTHER）
+- 信頼度スコア計算（マッチしたキーワード数に基づく0.5〜0.9）
+- マッチしたキーワードの記録
+
+#### トリアージロジック
+```typescript
+export function analyzeMessage(text: string): TriageResult {
+  // 1. クレーム判定 - COMPLAINT_KEYWORDS から検出
+  // 2. クレーム種別判定 - COMPLAINT_TYPE_KEYWORDS で分類
+  // 3. 緊急度判定 - URGENCY_*_KEYWORDS で優先順位付け
+  // 4. 優先度判定 - PRIORITY_HIGH_KEYWORDS またはクレームでHIGH
+  // 5. 信頼度計算 - マッチ数に応じて0.5〜0.9
+  return { priority, urgency, isComplaint, complaintType, confidence, matchedKeywords }
+}
+```
+
+### 2. トリアージサービス
+分析結果を会話に適用するサービス層：
+
+#### 実装ファイル
+`src/lib/triage-service.ts`
+
+#### 機能
+- `runTriage()`: 単一メッセージのトリアージ実行
+- `runTriageMultiple()`: 複数メッセージの結合分析
+- `retriageConversation()`: 既存会話の再トリアージ
+- スマート更新ロジック（手動設定を上書きしない）
+  - 優先度: アップグレードのみ（LOW→MEDIUM/HIGH, MEDIUM→HIGH）
+  - 緊急度: より高い緊急度への更新のみ
+  - クレームフラグ: 一度trueになったら手動でのみ解除可能
+
+#### 更新ロジック
+```typescript
+// 優先度: MEDIUM→HIGHまたはLOW→MEDIUM/HIGHのみ更新
+if ((current.priority === Priority.MEDIUM && result.priority === Priority.HIGH) ||
+    (current.priority === Priority.LOW && result.priority !== Priority.LOW)) {
+  updates.priority = result.priority
+}
+
+// 緊急度: 緊急度ランク（ANYTIME=0, THIS_WEEK=1, TODAY=2, NOW=3）が高い方向のみ
+if (urgencyPriority[result.urgency] > urgencyPriority[current.urgency]) {
+  updates.urgency = result.urgency
+}
+
+// クレーム: false→trueのみ（true→falseは手動のみ）
+if (result.isComplaint && !current.isComplaint) {
+  updates.isComplaint = true
+  updates.complaintType = result.complaintType
+}
+```
+
+### 3. Webhook統合
+受信メッセージ時に自動トリアージを実行：
+
+#### 更新ファイル
+`src/lib/line-handler.ts`
+
+#### 追加機能
+- メッセージ保存後に `runTriage()` を自動実行
+- トリアージ結果が会話に即座に反映
+- エラー時のログ記録
+
+#### 実装箇所（line 98-99）
+```typescript
+await saveInboundMessage(...)
+await runTriage(conversation.id, textMessage.text)
+```
+
+### 4. トリアージ手動上書きAPI
+Agent/Adminが自動分類を手動で修正できるAPI：
+
+#### 実装ファイル
+`src/app/api/conversations/[id]/triage/route.ts`
+
+#### 機能
+- PATCH メソッドでトリアージ結果の上書き
+- Agent/Admin権限チェック
+- priority, urgency, isComplaint, complaintType の個別更新
+- クレームフラグをfalseに戻すことが可能（手動のみ）
+- 監査ログへの記録（OVERRIDE_TRIAGE action）
+
+#### APIエンドポイント
+```
+PATCH /api/conversations/{id}/triage
+Body: {
+  priority?: Priority,
+  urgency?: Urgency,
+  isComplaint?: boolean,
+  complaintType?: ComplaintType | null
+}
+Response: { conversation: ConversationWithDetails }
+```
+
+### 5. トリアージルール参照API
+Admin用のルール設定確認API：
+
+#### 実装ファイル
+`src/app/api/admin/triage-rules/route.ts`
+
+#### 機能
+- GET メソッドで現在のルール設定を取得
+- Admin権限チェック
+- キーワードリストとその件数を返却
+
+#### APIエンドポイント
+```
+GET /api/admin/triage-rules
+Response: {
+  complaintKeywords: string[],
+  urgencyKeywords: { now: string[], today: string[], thisWeek: string[] },
+  priorityKeywords: string[],
+  complaintTypeKeywords: Record<ComplaintType, string[]>
+}
+```
+
+---
+
+## 🔧 技術的詳細
+
+### 使用した既存ライブラリ/サービス
+- `@/lib/api-auth`: 認証・権限チェック
+- `@/lib/prisma`: データベース接続
+- `@prisma/client`: Priority, Urgency, ComplaintType enum
+
+### キーワード定義
+- **クレームキーワード**: 29個（'最悪', '返金', '詐欺', 'クレーム', '謝罪', '責任者', '訴える' など）
+- **緊急度キーワード**:
+  - NOW: 8個（'今すぐ', '至急', '緊急', '今日中', 'すぐに' など）
+  - TODAY: 5個（'今日', '本日', 'できるだけ早く', '早めに' など）
+  - THIS_WEEK: 3個（'今週', '今週中', '週内'）
+- **優先度キーワード**: 10個（'解約', '退会', '返金', '個人情報', '漏洩', '法的', '弁護士' など）
+- **クレーム種別キーワード**: BILLING（7個）, QUALITY（6個）, DELAY（5個）, ATTITUDE（6個）
+
+### トリアージアルゴリズム
+1. メッセージテキストを小文字化して正規化
+2. 各カテゴリのキーワードマッチング（部分一致）
+3. マッチしたキーワードを記録（デバッグ・監査用）
+4. クレーム判定（1つ以上のクレームキーワードマッチ）
+5. クレーム種別判定（BILLING > QUALITY > DELAY > ATTITUDE > OTHER の優先順）
+6. 緊急度判定（NOW > TODAY > THIS_WEEK > ANYTIME の優先順）
+7. 優先度判定（優先度キーワードまたはクレームでHIGH、それ以外はMEDIUM）
+8. 信頼度スコア計算（マッチ数 >= 3: 0.9, >= 2: 0.8, >= 1: 0.7, 0: 0.5）
+9. クレーム/HIGH優先度の場合は信頼度を最低0.8に調整
+
+### セキュリティ対策
+- ロールベースアクセス制御（RBAC）
+- 手動上書きはAgent/Admin権限必須
+- ルール参照はAdmin権限必須
+- すべての手動操作を監査ログに記録
+
+---
+
+## 🧪 テスト項目
+
+### 実装した機能の検証
+- ✅ TypeScriptコンパイル成功
+- ✅ 型チェック成功（npx tsc --noEmit）
+- ✅ TagSelector.tsx の null color 対応完了
+
+### 想定されるテストシナリオ
+1. クレームキーワード含むメッセージで isComplaint=true, priority=HIGH になる
+2. 緊急度キーワード含むメッセージで urgency が適切に設定される
+3. 複数キーワードマッチで confidence が上がる
+4. 手動設定（HIGH）は自動トリアージ（MEDIUM）で上書きされない
+5. クレームフラグは自動でfalse→trueのみ、true→falseは手動のみ
+6. Agent が手動上書きできる
+7. Admin がルール設定を参照できる
+8. Viewer がトリアージAPIにアクセスすると403エラー
+9. 監査ログに OVERRIDE_TRIAGE が記録される
+
+---
+
+## 📈 実装状況
+
+### 主要機能
+- ルールベーストリアージエンジン
+- 自動トリアージ実行（Webhook統合）
+- 手動トリアージ上書き（Agent/Admin）
+- トリアージルール参照（Admin）
+- スマート更新ロジック（手動設定保護）
+- 信頼度スコアリング
+- 監査ログの自動記録
+
+### データベース使用状況
+- ✅ Conversation.priority: 自動更新開始
+- ✅ Conversation.urgency: 自動更新開始
+- ✅ Conversation.isComplaint: 自動設定開始
+- ✅ Conversation.complaintType: 自動分類開始
+- ✅ AuditLog: OVERRIDE_TRIAGE action使用開始
+
+---
+
+## 💰 コスト・リソース
+
+### 使用リソース
+- 開発時間: 約30分
+- 追加コスト: なし（外部APIなし）
+- 外部依存: なし（ルールベース処理）
+
+### パフォーマンス見込み
+- トリアージ分析: <5ms（キーワードマッチングのみ）
+- 会話更新: <20ms（条件付きDB更新）
+- 手動上書き: <30ms（更新 + 監査ログ）
+- ルール参照: <5ms（メモリ内配列返却）
+
+---
+
+## 📚 関連ドキュメント
+
+- [チケット#014詳細](../line-dashboard-tickets/tickets/014-triage-rules.md) - 本チケットの仕様
+- [DATABASE_DESIGN.md](./prisma/DATABASE_DESIGN.md) - データベーススキーマ
+- [CLAUDE.md](./CLAUDE.md) - Claude Codeガイド
+
+---
+
+## 📅 作業日時（チケット#017）
+**実施日**: 2026年1月7日
+**作業時間**: 約25分
+**担当**: 開発チーム
+
+---
+
+## 📋 実施した作業（チケット#017）
+
+### 作業タイトル
+**監査ログ機能の実装**
+
+### 作業の目的
+すべての重要な操作を監査ログに記録し、Adminが閲覧できる機能を実装しました。システムの透明性を確保し、操作履歴を追跡可能にします。
+
+---
+
+## ✅ 完了した内容
+
+### 1. 既存の監査ログ実装の確認
+既に多くのAPIで監査ログが記録されていることを確認：
+
+#### 記録済みの操作
+- ✅ **返信送信** (SEND_MESSAGE) - `src/app/api/conversations/[id]/send/route.ts`
+- ✅ **ステータス変更** (STATUS_CHANGED) - `src/app/api/conversations/[id]/status/route.ts`
+- ✅ **担当者アサイン** (ASSIGNED, SELF_ASSIGNED) - `src/app/api/conversations/[id]/assign/route.ts`, `assign-me/route.ts`
+- ✅ **トリアージ変更** (OVERRIDE_TRIAGE) - `src/app/api/conversations/[id]/triage/route.ts`
+- ✅ **メモ更新** (MEMO_UPDATED) - `src/app/api/contacts/[id]/memo/route.ts`
+
+#### 既存の監査サービス
+`src/lib/audit-service.ts` が実装済み：
+- `createAuditLog()`: 監査ログ作成
+- `getConversationAuditLogs()`: 会話別ログ取得
+- `getUserAuditLogs()`: ユーザー別ログ取得
+- `getAllAuditLogs()`: 全ログ取得
+
+### 2. 監査ログ閲覧API
+Admin権限でのみアクセス可能なログ閲覧API：
+
+#### 実装ファイル
+`src/app/api/audit-logs/route.ts`
+
+#### 機能
+- GET メソッドでログ取得
+- Admin権限チェック (`requireAdmin`)
+- 柔軟なフィルタリング：
+  - `conversationId`: 会話別フィルタ
+  - `userId`: ユーザー別フィルタ
+  - `action`: 操作種別フィルタ
+- ページネーション：
+  - `page`: ページ番号（デフォルト: 1）
+  - `limit`: 1ページあたりの件数（デフォルト: 100、最大: 500）
+- ユーザー情報・会話情報を含めた詳細取得
+
+#### APIエンドポイント
+```
+GET /api/audit-logs
+Query params:
+  - conversationId?: string
+  - userId?: string
+  - action?: string
+  - page?: number (default: 1)
+  - limit?: number (default: 100, max: 500)
+
+Response: {
+  logs: AuditLog[],
+  pagination: {
+    page: number,
+    limit: number,
+    total: number,
+    totalPages: number
+  }
+}
+```
+
+### 3. 監査ログ閲覧画面
+Admin専用の監査ログ閲覧UI：
+
+#### 実装ファイル
+`src/app/admin/audit-logs/page.tsx`
+
+#### 機能
+- 監査ログのテーブル表示
+- フィルタ機能：
+  - 操作種別でフィルタ（すべて/返信送信/ステータス変更/担当変更/トリアージ変更/メモ更新）
+  - ユーザーIDでフィルタ
+  - フィルタクリアボタン
+- ページネーション（前へ/次へボタン）
+- 表示項目：
+  - 日時（yyyy/MM/dd HH:mm:ss）
+  - ユーザー名・メールアドレス
+  - 操作種別（カラーバッジ表示）
+  - 会話リンク（顧客名）
+  - 変更内容（JSON表示）
+  - IPアドレス
+- リアルタイム統計（全件数、表示範囲）
+- エラーハンドリング（403権限エラー、再読み込みボタン）
+
+#### UIデザイン
+- Tailwind CSS でスタイリング
+- 操作種別ごとの色分けバッジ：
+  - 返信送信: 青（bg-blue-100）
+  - ステータス変更: 黄（bg-yellow-100）
+  - 担当変更: 緑（bg-green-100）
+  - トリアージ変更: 紫（bg-purple-100）
+  - メモ更新: ピンク（bg-pink-100）
+
+### 4. Conversation詳細での履歴表示
+会話詳細画面のサイドバーに変更履歴を表示：
+
+#### 実装ファイル
+- `src/components/ConversationHistory.tsx` (新規作成)
+- `src/components/ConversationSidebar.tsx` (更新)
+
+#### 機能
+- 会話に関連する監査ログを時系列で表示
+- 操作種別ごとの日本語ラベル表示
+- 変更内容の可読性向上：
+  - ステータス変更: `NEW → WORKING` 形式
+  - 担当変更: `田中 → 佐藤` 形式
+  - トリアージ変更: 優先度・緊急度・クレームフラグの変更を個別表示
+  - 返信送信: メッセージのプレビュー表示
+  - メモ更新: 「メモを更新しました」と表示
+- 日時表示（MM/dd HH:mm）
+- ユーザー名表示
+- 履歴がない場合の適切なメッセージ
+- 読み込み中の状態表示
+
+#### 統合
+ConversationSidebarに「変更履歴」セクションを追加：
+- 顧客情報の下にボーダー区切りで配置
+- ConversationHistoryコンポーネントをインポートして使用
+
+### 5. 既存ファイルの修正
+実装中に発見した構文エラーを修正：
+
+#### `src/app/admin/tags/page.tsx`
+- 閉じタグ不足を修正（divの閉じタグ追加）
+
+#### `src/app/admin/users/page.tsx`
+- Role型のキャストエラーを修正（`as any` に変更）
+
+---
+
+## 🔧 技術的詳細
+
+### 使用した既存ライブラリ/サービス
+- `@/lib/api-auth`: Admin権限チェック
+- `@/lib/audit-service`: 監査ログ作成・取得
+- `@/lib/prisma`: データベース接続
+- `date-fns`: 日時フォーマット
+- `date-fns/locale/ja`: 日本語ロケール
+
+### データベース構造
+監査ログは `AuditLog` テーブルに保存：
+- `id`: ログID
+- `userId`: 操作ユーザーID
+- `conversationId`: 関連会話ID（optional）
+- `action`: 操作種別（文字列）
+- `changes`: 変更内容（JSONB）
+- `ipAddress`: IPアドレス
+- `userAgent`: User-Agent
+- `createdAt`: 作成日時
+
+### 記録される操作一覧
+| 操作 | Action名 | 記録内容 |
+|------|----------|----------|
+| 返信送信 | SEND_MESSAGE | messageId, text, contactId, contactName |
+| ステータス変更 | STATUS_CHANGED | from, to |
+| 担当変更 | ASSIGNED | from, to, fromUserName, toUserName |
+| 自己アサイン | SELF_ASSIGNED | userId |
+| トリアージ変更 | OVERRIDE_TRIAGE | oldPriority, newPriority, oldUrgency, newUrgency, oldIsComplaint, newIsComplaint, oldComplaintType, newComplaintType |
+| メモ更新 | MEMO_UPDATED | contactId, from, to |
+
+### セキュリティ対策
+- 監査ログ閲覧はAdmin権限必須（`requireAdmin`）
+- 不正アクセス時は403エラー返却
+- IPアドレス・User-Agentの記録で操作元を追跡
+- すべての重要操作を自動記録（記録漏れ防止）
+
+---
+
+## 🧪 テスト項目
+
+### 実装した機能の検証
+- ✅ TypeScriptコンパイル成功
+- ✅ 型チェック成功（npx tsc --noEmit）
+- ✅ 既存の監査ログ記録を確認
+- ✅ 構文エラー修正（tags/page.tsx, users/page.tsx）
+
+### 想定されるテストシナリオ
+1. Admin が監査ログ一覧にアクセスできる
+2. Agent/Viewer が監査ログにアクセスすると403エラー
+3. 操作種別でフィルタできる
+4. ユーザーIDでフィルタできる
+5. ページネーションが正しく動作する
+6. 会話詳細画面で変更履歴が表示される
+7. 返信送信時に SEND_MESSAGE が記録される
+8. ステータス変更時に STATUS_CHANGED が記録される
+9. 担当変更時に ASSIGNED が記録される
+10. トリアージ変更時に OVERRIDE_TRIAGE が記録される
+11. メモ更新時に MEMO_UPDATED が記録される
+12. 変更内容のJSONが正しく表示される
+13. 会話リンクが正しく機能する
+
+---
+
+## 📈 実装状況
+
+### 主要機能
+- 監査ログ閲覧API（Admin権限）
+- 監査ログ閲覧画面（フィルタ・ページネーション）
+- Conversation詳細での変更履歴表示
+- 操作種別ごとのカラーバッジ表示
+- 変更内容の可読性向上
+- 既存の監査ログ記録の確認
+
+### データベース使用状況
+- ✅ AuditLog: 全ての重要操作を記録中
+- ✅ AuditLog.action: SEND_MESSAGE, STATUS_CHANGED, ASSIGNED, SELF_ASSIGNED, OVERRIDE_TRIAGE, MEMO_UPDATED
+- ✅ AuditLog.changes: JSONB で詳細情報を保存
+- ✅ AuditLog.conversationId: 会話との紐付け
+- ✅ AuditLog.userId: ユーザーとの紐付け
+
+---
+
+## 💰 コスト・リソース
+
+### 使用リソース
+- 開発時間: 約25分
+- 追加コスト: なし
+- 外部依存: なし
+
+### パフォーマンス見込み
+- 監査ログ取得: <50ms（インデックス使用）
+- ページネーション: <30ms（COUNT最適化）
+- フィルタ検索: <40ms（WHERE条件最適化）
+- 会話別履歴取得: <20ms（conversationIdインデックス）
+
+---
+
+## 📚 関連ドキュメント
+
+- [チケット#017詳細](../line-dashboard-tickets/tickets/017-audit-log.md) - 本チケットの仕様
+- [DATABASE_DESIGN.md](./prisma/DATABASE_DESIGN.md) - データベーススキーマ
+- [CLAUDE.md](./CLAUDE.md) - Claude Codeガイド
+
+---
+
 **作成者**: 開発チーム
 **最終更新**: 2026年1月7日
-**バージョン**: 1.8.0
+**バージョン**: 1.10.0

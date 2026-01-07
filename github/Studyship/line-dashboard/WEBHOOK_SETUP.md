@@ -41,7 +41,6 @@ npm run dev
 # 別のターミナルでngrokを起動
 ngrok http 3000
 ```
-
 ### 2. Webhook URLの取得
 
 ngrokが起動すると、以下のような情報が表示されます：

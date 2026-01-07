@@ -105,6 +105,7 @@ export async function GET(req: NextRequest) {
               displayName: true,
               pictureUrl: true,
               isBlocked: true,
+              memo: true,
             },
           },
           assignedUser: {

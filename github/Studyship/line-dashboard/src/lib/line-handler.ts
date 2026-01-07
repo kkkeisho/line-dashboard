@@ -8,6 +8,7 @@ import {
 import { getOrCreateContact, markContactAsBlocked, unblockContact } from './contact-service'
 import { getOrCreateConversation } from './conversation-service'
 import { saveInboundMessage } from './message-service'
+import { runTriage } from './triage-service'
 
 /**
  * Main webhook event handler
@@ -93,6 +94,9 @@ async function handleMessageEvent(event: MessageEvent): Promise<void> {
       new Date(timestamp),
       rawPayload // Store serialized event as rawPayload
     )
+
+    // Run triage analysis on the inbound message
+    await runTriage(conversation.id, textMessage.text)
 
     console.log('Message saved successfully:', {
       contactId: contact.id,

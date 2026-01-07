@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import { TagSelector } from '@/components/TagSelector'
+import { ConversationHistory } from '@/components/ConversationHistory'
 
 interface Contact {
   id: string
@@ -243,27 +245,11 @@ export function ConversationSidebar({
 
       {/* タグ */}
       <div>
-        <label className="block text-sm font-medium text-gray-700">
-          タグ
-        </label>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {conversation.tags.length > 0 ? (
-            conversation.tags.map((ct) => (
-              <span
-                key={ct.tag.id}
-                className="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium"
-                style={{
-                  backgroundColor: ct.tag.color || '#e5e7eb',
-                  color: '#1f2937',
-                }}
-              >
-                {ct.tag.name}
-              </span>
-            ))
-          ) : (
-            <span className="text-sm text-gray-500">タグなし</span>
-          )}
-        </div>
+        <TagSelector
+          conversationId={conversation.id}
+          selectedTags={conversation.tags}
+          onUpdate={onUpdate}
+        />
       </div>
 
       {/* 顧客情報 */}
@@ -277,6 +263,11 @@ export function ConversationSidebar({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* 変更履歴 */}
+      <div className="border-t pt-6">
+        <ConversationHistory conversationId={conversation.id} />
       </div>
     </div>
   )
